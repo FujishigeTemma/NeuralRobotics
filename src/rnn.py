@@ -21,15 +21,23 @@ class RNNCell(nn.RNNCellBase):
     def __call__(self, carry: Carry, x: jax.Array):
         h = carry
 
+        jax.debug.print(f"x.shape {x.shape}, h.shape {h.shape}")
         h = nn.Dense(self.hidden_dim)(x) + nn.Dense(self.hidden_dim)(h)
         h = nn.activation.sigmoid(h)
 
         y = nn.Dense(self.output_dim)(h)
+        y = nn.activation.sigmoid(y)
 
         return h, y
 
+    @nn.nowrap
     def initialize_carry(self, key: jax.random.KeyArray, input_shape: Tuple[int, ...]) -> Carry:
-        return super().initialize_carry(key, input_shape)
+        initializer = nn.initializers.uniform()
+        return initializer(key, (self.hidden_dim, 1))
+
+    @property
+    def num_feature_axes(self) -> int:
+        return 2
 
 
 def get_model():
@@ -87,7 +95,7 @@ def train(type: str):
     shift = jnp.array([min_x, min_y])
     scale = jnp.array([max_x - min_x, max_y - min_y])
     for i in range(len(trajectories)):
-        trajectories[i] = (trajectories[i] - shift) / scale
+        trajectories[i] = 0.1 + 0.8 * ((trajectories[i] - shift) / scale)
 
     trajectories = [trajectory[:: len(trajectory) // 100] for trajectory in trajectories]
     max_length = max([len(trajectory) for trajectory in trajectories])
@@ -99,7 +107,6 @@ def train(type: str):
         total_loss = 0.0
         for trajectory in trajectories:
             state, metrics = train_step(state, trajectory)
-
             total_loss += metrics["loss"]
         jax.debug.print(f"Epoch {epoch}, Loss: {total_loss / len(trajectories)}")
 

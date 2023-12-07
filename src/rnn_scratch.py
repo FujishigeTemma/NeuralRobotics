@@ -30,11 +30,10 @@ class RNNCell:
         bh: jax.Array = jnp.zeros((self.hidden_dim, 1))
         Why = random.normal(keys[2], (self.output_dim, self.hidden_dim)) * 0.01
         by: jax.Array = jnp.zeros((self.output_dim, 1))
-        h0: Carry = jnp.zeros((self.hidden_dim, 1))
-        return (Wxh, Whh, bh, Why, by, h0)
+        return (Wxh, Whh, bh, Why, by)
 
     def __call__(self, params: Params, carry: Carry, x) -> tuple[Carry, jax.Array]:
-        (Wxh, Whh, bh, Why, by, h0) = params
+        (Wxh, Whh, bh, Why, by) = params
         h = carry
 
         h = jax.nn.sigmoid(jnp.dot(Wxh, x) + jnp.dot(Whh, h) + bh)
@@ -51,14 +50,10 @@ class RNN:
     def __init__(self, cell: RNNCell):
         self.cell = cell
 
-    def __call__(self, params: Params, inputs, init_carry: Carry | None = None, init_key: random.KeyArray | None = None) -> tuple[jax.Array, jax.Array]:
-        if init_carry is None:
-            if init_key is None:
-                raise ValueError("Either init_carry or init_key must be provided")
-            carry = self.cell.initialize_carry(init_key)
-        else:
-            carry = init_carry
-        carries = []
+    def __call__(self, params: Params, inputs, init_key: random.KeyArray) -> tuple[jax.Array, jax.Array]:
+        carry = self.cell.initialize_carry(init_key)
+
+        carries = [carry]
         outputs = []
         for t in range(inputs.shape[0] - 1):
             carry, output = self.cell(params, carry, inputs[t])
@@ -74,7 +69,7 @@ def sigmoid_derivative(x):
 
 @jax.jit
 def compute_grads(params: Params, x, carry, y_pred, y_target, _lambda):
-    (Wxh, Whh, bh, Why, by, h0) = params
+    (Wxh, Whh, bh, Why, by) = params
     h = carry
 
     2 * (y_pred - y_target)
@@ -82,7 +77,7 @@ def compute_grads(params: Params, x, carry, y_pred, y_target, _lambda):
     y_raw = jnp.dot(Why, h) + by
     sigmoid_derivative(y_raw) * h
 
-    return (dWxh, dWhh, dbh, dWhy, dby, dh0), dh
+    return (dWxh, dWhh, dbh, dWhy, dby), dh
 
 
 @jax.jit
@@ -105,10 +100,9 @@ def load_params(path: str) -> Params:
 @click.option("--n-epochs", required=True, type=int)
 @click.option("--learning-rate", required=True, type=float)
 @click.option("---lambda", required=True, type=float)
-@click.option("--learn-h0", is_flag=True)
 @click.option("--output", required=True)
 @click.option("--resume", is_flag=True)
-def train(type: str, seed: int, n_epochs: int, learning_rate: float, _lambda: float, learn_h0: bool, output: str, resume: bool):
+def train(type: str, seed: int, n_epochs: int, learning_rate: float, _lambda: float, output: str, resume: bool):
     input_dim, hidden_dim, output_dim = 2, 10, 2
     cell = RNNCell(input_dim, hidden_dim, output_dim)
     rnn = RNN(cell)
@@ -122,8 +116,6 @@ def train(type: str, seed: int, n_epochs: int, learning_rate: float, _lambda: fl
         latest_epoch = 0
         key, *subkeys = random.split(key, 3)
         params = cell.init(subkeys[0])
-        if learn_h0:
-            params = (params[0], params[1], params[2], params[3], params[4], rnn.cell.initialize_carry(subkeys[1]))
 
     clipping_threshold = 1.0
 
@@ -134,7 +126,6 @@ def train(type: str, seed: int, n_epochs: int, learning_rate: float, _lambda: fl
         "lambda": _lambda,
         "clipping_threshold": clipping_threshold,
         "learning_rate": learning_rate,
-        "learn_h0": learn_h0,
     }
 
     wandb.init(project=f"rnn_scratch_{type}", config=config)
@@ -171,11 +162,8 @@ def train(type: str, seed: int, n_epochs: int, learning_rate: float, _lambda: fl
             x = jnp.array(trajectory[:-1])
             y_target = jnp.array(trajectory[1:])
 
-            if learn_h0:
-                carries, y_preds = rnn(params, x, init_carry=params[5])
-            else:
-                key, subkey = random.split(key)
-                carries, y_preds = rnn(params, x, init_key=subkey)
+            key, subkey = random.split(key)
+            carries, y_preds = rnn(params, x, init_key=subkey)
 
             total_grads = None
             T = len(y_preds)
@@ -205,7 +193,6 @@ def train(type: str, seed: int, n_epochs: int, learning_rate: float, _lambda: fl
                 "by": jnp.mean(params[2]),
                 "Wxh": jnp.mean(params[3]),
                 "bh": jnp.mean(params[4]),
-                "h0": jnp.mean(params[5]),
             },
         )
 
@@ -218,11 +205,10 @@ def train(type: str, seed: int, n_epochs: int, learning_rate: float, _lambda: fl
 @click.option("--seed", required=True, default=0)
 @click.option("--epoch", required=True, type=int)
 @click.option("--use-input", is_flag=True)
-@click.option("--use-h0", is_flag=True)
 @click.option("--n-samples", type=int)
 @click.option("--n-steps", type=int)
 @click.option("--output", required=True)
-def predict(type: str, seed: int, epoch: int, use_input: bool, use_h0: bool, n_samples: int, n_steps: int, output: str):
+def predict(type: str, seed: int, epoch: int, use_input: bool, n_samples: int, n_steps: int, output: str):
     input_dim, hidden_dim, output_dim = 2, 10, 2
     cell = RNNCell(input_dim, hidden_dim, output_dim)
     rnn = RNN(cell)
@@ -258,15 +244,10 @@ def predict(type: str, seed: int, epoch: int, use_input: bool, use_h0: bool, n_s
 
         key, subkey = random.split(key)
         if use_input:
-            if use_h0:
-                h, y = rnn(params, x, init_carry=params[5])
-            else:
-                h, y = rnn(params, x, init_key=subkey)
+            h, y = rnn(params, x, init_key=subkey)
         else:
-            if use_h0:
-                carry = params[5]
-            else:
-                carry = rnn.cell.initialize_carry(subkey)
+            carry = rnn.cell.initialize_carry(subkey)
+
             x = x[0]
             carries = [carry]
             ys = []
